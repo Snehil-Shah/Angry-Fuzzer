@@ -1,0 +1,32 @@
+services:
+  controller:
+    build:
+      context: ./controller
+    volumes:
+      - /tmp/angry-fuzzer:/tmp/angry-fuzzer
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TARGET_REPO=${TARGET_REPO}
+      - CORPUS_REPO=${CORPUS_REPO}
+      - TEMP_DIR=${TEMP_DIR:-/tmp/angry-fuzzer}
+      - FUZZ_TIME=${FUZZ_TIME:-5m}
+      - WORKER_IMAGE=angry-fuzzer-worker:latest
+      - NETWORK_NAME=angry-fuzzer_fuzzing-network
+      - CLEANUP_AFTER=${CLEANUP_AFTER:-true}
+    networks:
+      - fuzzing-network
+    restart: "no"
+
+  worker:
+    build:
+      context: ./worker
+    image: angry-fuzzer-worker:latest
+    networks:
+      - fuzzing-network
+    deploy:
+      replicas: 0
+    restart: "no"
+
+networks:
+  fuzzing-network:
+    name: angry-fuzzer_fuzzing-network
