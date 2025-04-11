@@ -18,6 +18,7 @@ echo "Target repository: $TARGET_REPO"
 echo "Corpus repository: $CORPUS_REPO"
 echo "Working directory: $TEMP_DIR"
 echo "Fuzz duration: $FUZZ_TIME"
+echo ""
 
 # Create temp directory if it doesn't exist
 mkdir -p "$TEMP_DIR"
@@ -30,6 +31,7 @@ fi
 
 echo "Cloning target repository..."
 git clone "$TARGET_REPO" "$TARGET_DIR"
+echo ""
 
 # Clone or update the corpus repository
 if [ -z "$CORPUS_REPO" ]; then
@@ -38,6 +40,7 @@ if [ -z "$CORPUS_REPO" ]; then
 fi
 echo "Cloning corpus repository..."
 git clone "$CORPUS_REPO" "$CORPUS_DIR"
+echo ""
 
 # Change to target directory
 cd "$TARGET_DIR"
@@ -69,9 +72,6 @@ if [ -n "$FUZZ_TEST_FILES" ]; then
     POTENTIAL_FUZZ_PACKAGES=$(echo -e "$POTENTIAL_FUZZ_PACKAGES" | sort | uniq)
 fi
 
-FUZZ_PACKAGE_COUNT=$(echo "$POTENTIAL_FUZZ_PACKAGES" | grep -v '^$' | wc -l)
-echo "Found $FUZZ_PACKAGE_COUNT potential packages with fuzz tests"
-
 # Create a list of packages to process
 packages=()
 for pkg_dir in $POTENTIAL_FUZZ_PACKAGES; do
@@ -85,17 +85,22 @@ done
 
 total_packages=${#packages[@]}
 echo "Found $total_packages packages with fuzz tests"
+echo ""
 
 # Clean up any existing worker containers from previous runs
 echo "Cleaning up any existing worker containers..."
 docker ps -a --filter "name=angry-fuzzer-worker-" -q | xargs -r docker rm -f
+echo ""
 
 worker_containers=()
+worker_count=0
 
 # Start a worker for each fuzz target in each package
 echo "Finding and starting workers for all fuzz targets..."
 for i in "${!packages[@]}"; do
     package="${packages[$i]}"
+
+    echo ""
     echo "[$(date)] Finding fuzz targets in package: $package"
 
     # Get the package directory (absolute path)
@@ -140,17 +145,19 @@ for i in "${!packages[@]}"; do
             -e PKG_RELATIVE_PATH="$rel_pkg_dir" \
             -e PKG_NAME="$package" \
             -e FUZZ_TARGET="$fuzz_target" \
-            "$WORKER_IMAGE"
+            "$WORKER_IMAGE" > /dev/null
 
         # Store container ID
         container_id=$(docker ps -q --filter "name=$container_name")
         worker_containers+=("$container_id")
 
-        echo "[$(date)] Started worker container: $container_name (ID: $container_id)"
+        echo "[$(date)] Started worker container: $container_name"
     done <<< "$fuzz_targets"
 done
 
+echo ""
 echo "All workers started. Waiting for completion..."
+echo ""
 
 # Function to check if all containers are done
 all_workers_done() {
@@ -179,26 +186,155 @@ while ! all_workers_done; do
     sleep 5
 done
 
+echo ""
 echo "All workers have completed"
+echo ""
 
-# Clean up all worker containers
-# echo "Cleaning up worker containers..."
-# for container_id in "${worker_containers[@]}"; do
-#     docker rm -f "$container_id" >/dev/null 2>&1 || true
-# done
-
+# Clean up worker containers if enabled
+echo "Cleaning up worker containers..."
+for container_id in "${worker_containers[@]}"; do
+    docker rm -f "$container_id" >/dev/null 2>&1 || true
+done
 echo "Container cleanup complete"
+echo ""
 
 # Create metadata file with timestamp
+current_time=$(date -Iseconds)
 cat > "$CORPUS_DIR/.fuzzer-metadata.json" <<EOF
 {
-    "last_run": "$(date -Iseconds)",
+    "last_run": "$current_time",
     "target_repo": "$TARGET_REPO",
     "corpus_repo": "$CORPUS_REPO",
     "fuzz_time": "$FUZZ_TIME",
     "packages_processed": $total_packages,
-    "parallel_workers": $total_packages
+    "workers_launched": $worker_count
 }
 EOF
+
+# Function to create an issue in the target repository
+create_target_issue() {
+    # Ensure we have a GitHub token and valid target repository
+    if [ -n "$GITHUB_TOKEN" ] && [[ "$TARGET_REPO" =~ github\.com/(.+) ]]; then
+        TARGET_REPO_PATH="${BASH_REMATCH[1]}"
+        # Remove .git extension if present
+        TARGET_REPO_PATH="${TARGET_REPO_PATH%.git}"
+
+        echo "Creating issue in target repository using GitHub CLI..."
+
+        # Get the corpus commit SHA
+        cd "$CORPUS_DIR"
+        CORPUS_COMMIT=$(git rev-parse HEAD)
+        CORPUS_REPO_PATH="${CORPUS_REPO%.git}"
+        CORPUS_URL="$CORPUS_REPO_PATH/commit/$CORPUS_COMMIT"
+
+        # Count new corpus entries
+        NEW_CORPUS_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD | grep -v "\.fuzzer-metadata\.json" | wc -l)
+
+        # Create issue body
+        ISSUE_BODY="## Fuzzing Corpus Update
+
+The [Angry-Fuzzer](https://github.com/Snehil-Shah/Angry-Fuzzer) tool has generated new corpus entries for this project.
+
+### Summary
+- **Run Date:** $current_time
+- **Duration:** $FUZZ_TIME per target
+- **Packages Processed:** $total_packages
+- **Workers Launched:** $worker_count
+- **New Corpus Files:** $NEW_CORPUS_FILES
+
+### Corpus Repository
+The updated corpus is available at: $CORPUS_REPO
+
+### Latest Commit
+The latest corpus update is in commit: $CORPUS_URL
+"
+        if gh issue create --title "[AUTOMATED]: Fuzzing Corpus Update: $(date +%Y-%m-%d)" --body "$ISSUE_BODY" --repo "$TARGET_REPO_PATH"; then
+            echo "Issue created successfully in target repository"
+        else
+            echo "Failed to create issue. Check your token permissions."
+        fi
+    else
+        echo "Skipping issue creation: Target repo is not on GitHub or token not provided"
+    fi
+}
+
+# Push changes back to corpus repository if enabled
+if [ -n "$CORPUS_REPO" ]; then
+    echo "Pushing corpus changes back to repository..."
+    cd "$CORPUS_DIR"
+
+    # Check if there are any changes
+    if git status --porcelain | grep -q .; then
+        # Configure git user (required for commit)
+        git config user.name "Angry-Fuzzer"
+        git config user.email "angry-fuzzer@automated.bot"
+
+        # Add all changes
+        git add .
+
+        # Create commit message with details
+        commit_message="chore: update corpus from fuzzing run at $current_time
+
+Target: $(basename "$TARGET_REPO")
+Duration: $FUZZ_TIME
+Packages: $total_packages
+Workers: $worker_count"
+
+        # Commit changes
+        git commit -m "$commit_message"
+
+        # Check if GitHub token is set and we need to push changes
+        if [ -n "$GITHUB_TOKEN" ]; then
+            # Extract the username/repo part from the URL for direct pushing
+            if [[ "$CORPUS_REPO" =~ github\.com/(.+) ]]; then
+                REPO_PATH="${BASH_REMATCH[1]}"
+
+                # Configure git to use token authentication
+                git remote set-url origin "https://$GITHUB_TOKEN@github.com/$REPO_PATH"
+                if git push; then
+                    echo "Corpus changes pushed successfully"
+                    echo ""
+
+                    # Reset URL to avoid exposing token in case of further git commands
+                    git remote set-url origin "$CORPUS_REPO"
+                    if [ -n "$TARGET_REPO" ]; then
+                        create_target_issue
+                    fi
+                else
+                    echo "Failed to push changes. Check your token permissions."
+                    # Reset URL to avoid exposing token
+                    git remote set-url origin "$CORPUS_REPO"
+                    exit 1
+                fi
+            else
+                echo "Repository URL doesn't match expected GitHub format: $CORPUS_REPO"
+                echo "Expected format: https://github.com/owner/repo.git"
+                exit 1
+            fi
+        else
+            echo "No GitHub token found. Skipping repository update."
+            echo "To push changes, create a .env file with GITHUB_TOKEN=your_token_here"
+        fi
+    else
+        echo "No changes to corpus detected"
+    fi
+else
+    echo "No corpus repository specified"
+fi
+
+echo ""
+echo "Cleaning up cloned repositories from $TEMP_DIR..."
+if [ -d "$TARGET_DIR" ]; then
+    echo "Removing target repository..."
+    rm -rf "$TARGET_DIR"
+fi
+
+if [ -d "$CORPUS_DIR" ]; then
+    echo "Removing corpus repository..."
+    rm -rf "$CORPUS_DIR"
+fi
+
+echo "Repository cleanup complete"
+echo ""
 
 echo "Fuzzing cycle completed successfully at $(date)"

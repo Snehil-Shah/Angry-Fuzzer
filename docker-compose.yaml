@@ -13,6 +13,7 @@ services:
       - WORKER_IMAGE=angry-fuzzer-worker:latest
       - NETWORK_NAME=angry-fuzzer_fuzzing-network
       - CLEANUP_AFTER=${CLEANUP_AFTER:-true}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     networks:
       - fuzzing-network
     restart: "no"

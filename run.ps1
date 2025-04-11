@@ -1,9 +1,20 @@
 # run.ps1 - Start angry-fuzzer with configurable options
 
+# Load GitHub token from .env file if it exists
+if (Test-Path ".env") {
+    Write-Host "Loading GitHub token from .env file"
+    # Only load GITHUB_TOKEN from .env file
+    Get-Content ".env" | ForEach-Object {
+        if ($_ -match '^GITHUB_TOKEN=(.*)' -and -not $_.StartsWith('#')) {
+            $env:GITHUB_TOKEN = $matches[1]
+        }
+    }
+}
+
 # Default values
 $TARGET_REPO = ""
 $CORPUS_REPO = ""
-$FUZZ_TIME = "5m"
+$FUZZ_TIME = "30s"
 $TEMP_DIR = "/tmp/angry-fuzzer"
 $HELP = $false
 
@@ -29,6 +40,10 @@ while ($i -lt $args.Count) {
             $TEMP_DIR = $args[$i+1]
             $i += 2
         }
+        "--no-push" {
+            $PUSH_CORPUS = $false
+            $i += 1
+        }
         "--help" {
             $HELP = $true
             $i += 1
@@ -48,9 +63,13 @@ if ($HELP) {
     Write-Host "Options:"
     Write-Host "  --target URL     Target repository URL (required)"
     Write-Host "  --corpus URL     Corpus repository URL"
-    Write-Host "  --time DURATION  Fuzzing duration per test (default: 5m)"
-    Write-Host "  --temp DIR       Temporary directory (default: C:/tmp/angry-fuzzer)"
+    Write-Host "  --time DURATION  Fuzzing duration per test (default: 30s)"
+    Write-Host "  --temp DIR       Temporary directory (default: /tmp/angry-fuzzer)"
     Write-Host "  --help           Show this help message"
+    Write-Host ""
+    Write-Host "GitHub authentication:"
+    Write-Host "  Create a .env file with your GitHub token for repository access:"
+    Write-Host "  GITHUB_TOKEN=your_github_token_here"
     exit 0
 }
 
@@ -82,6 +101,11 @@ if ([string]::IsNullOrEmpty($CORPUS_REPO)) {
 }
 Write-Host "Fuzz duration: $FUZZ_TIME"
 Write-Host "Temporary directory: $TEMP_DIR"
+if (-not [string]::IsNullOrEmpty($env:GITHUB_TOKEN)) {
+    Write-Host "GitHub token: [Set]"
+} else {
+    Write-Host "GitHub token: [Not set]"
+}
 Write-Host ""
 
 # Start the controller
